@@ -612,15 +612,6 @@ class LoginWindow(QWidget):
         """)
         layout.addWidget(self.txt_nick)
 
-        # Seleccion del protocolo (TCP o UDP).
-        proto_layout = QHBoxLayout()
-        lbl_proto = QLabel("Protocolo:")
-        self.cmb_protocol = QComboBox()
-        self.cmb_protocol.addItems(["TCP", "UDP"])
-        proto_layout.addWidget(lbl_proto)
-        proto_layout.addWidget(self.cmb_protocol)
-        layout.addLayout(proto_layout)
-
         # Boton para intentar la conexion y entrar al chat.
         self.btn_enter = QPushButton("Entrar al chat")
         self.btn_enter.setMinimumHeight(35)
@@ -661,7 +652,7 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, "Error", "El nickname no puede contener espacios.")
             return
 
-        protocol = self.cmb_protocol.currentText()
+        protocol = "TCP"
         initial_data = ""  # contenido inicial que se enviara al ChatWindow
 
         try:
@@ -727,54 +718,6 @@ class LoginWindow(QWidget):
 
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Error recibiendo respuesta del servidor:\n{e}")
-                    s.close()
-                    return
-
-            else:  # UDP
-                # Conexion UDP al servidor.
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.settimeout(2.0)
-                s.connect((SERVER_HOST, UDP_PORT))
-
-                # Enviar /nick para identificarse en el servidor UDP.
-                try:
-                    s.sendall(f"/nick {nick}\n".encode("utf-8"))
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"No se pudo enviar el nickname (UDP):\n{e}")
-                    s.close()
-                    return
-
-                # Leer respuesta del servidor UDP (aceptacion o error).
-                try:
-                    data = s.recv(4096)
-                    if not data:
-                        QMessageBox.critical(self, "Error", "El servidor UDP no respondió.")
-                        s.close()
-                        return
-                    text = data.decode("utf-8")
-
-                    # Diferentes posibles mensajes de error.
-                    if "Servidor UDP lleno" in text:
-                        QMessageBox.warning(self, "Servidor lleno",
-                                            "El servidor UDP está lleno (máximo 5 usuarios).")
-                        s.close()
-                        return
-                    if "ya está en uso" in text:
-                        QMessageBox.warning(self, "Nickname ocupado",
-                                            "Ese nickname ya está en uso, elige otro.")
-                        s.close()
-                        return
-                    if "Nombre inválido" in text or "nickname no puede" in text:
-                        QMessageBox.warning(self, "Nickname inválido",
-                                            "El nickname es inválido.")
-                        s.close()
-                        return
-
-                    # Si llega aqui, el nickname fue aceptado por el servidor UDP.
-                    initial_data = text
-
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Error recibiendo respuesta del servidor UDP:\n{e}")
                     s.close()
                     return
 
