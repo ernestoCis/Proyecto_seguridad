@@ -407,13 +407,6 @@ class ChatWindow(QWidget):
         if not msg or not self.sock:
             return
 
-        # Si es un comando /nick, se actualiza tambien el nick local mostrado en la barra superior.
-        if msg.startswith("/nick "):
-            parts = msg.split(" ", 1)
-            if len(parts) == 2:
-                self.my_nick = parts[1].strip()
-                self.lbl_info.setText(f"Conectado como: {self.my_nick} · Protocolo: {self.protocol}")
-
         try:
             if self.current_target is None:
                 # Mensaje grupal: se envia tal cual al servidor.
@@ -578,7 +571,7 @@ class LoginWindow(QWidget):
         # Ventana inicial donde el usuario elige su nickname y el protocolo (TCP o UDP).
         super().__init__()
         self.setWindowTitle("Juatsapp - Conexión")
-        self.resize(400, 200)
+        self.resize(400, 280)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -590,14 +583,14 @@ class LoginWindow(QWidget):
         lbl_title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(lbl_title)
 
-        # Campo para el nickname.
-        lbl_nick = QLabel("Nickname (sin espacios):")
-        layout.addWidget(lbl_nick)
+        # Campo para el usuario.
+        lbl_user = QLabel("Usuario:")
+        layout.addWidget(lbl_user)
 
-        self.txt_nick = QLineEdit()
-        self.txt_nick.setPlaceholderText("Escribe tu nickname...")
-        self.txt_nick.setMinimumHeight(30)
-        self.txt_nick.setStyleSheet("""
+        self.txt_user = QLineEdit()
+        self.txt_user.setPlaceholderText("Escribe tu usuario...")
+        self.txt_user.setMinimumHeight(30)
+        self.txt_user.setStyleSheet("""
             QLineEdit {
                 background-color: #ffffff;
                 border: 2px solid #cccccc;
@@ -610,10 +603,33 @@ class LoginWindow(QWidget):
                 border: 2px solid #6cc070;
             }
         """)
-        layout.addWidget(self.txt_nick)
+        layout.addWidget(self.txt_user)
+
+        # Campo para la contraseña.
+        lbl_password = QLabel("Contraseña:")
+        layout.addWidget(lbl_password)
+
+        self.txt_password = QLineEdit()
+        self.txt_password.setPlaceholderText("Escribe tu contraseña...")
+        self.txt_password.setEchoMode(QLineEdit.Password)
+        self.txt_password.setMinimumHeight(30)
+        self.txt_password.setStyleSheet("""
+            QLineEdit {
+                background-color: #ffffff;
+                border: 2px solid #cccccc;
+                border-radius: 10px;
+                padding-left: 8px;
+                padding-right: 8px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #6cc070;
+            }
+        """)
+        layout.addWidget(self.txt_password)
 
         # Boton para intentar la conexion y entrar al chat.
-        self.btn_enter = QPushButton("Entrar al chat")
+        self.btn_enter = QPushButton("Iniciar sesión")
         self.btn_enter.setMinimumHeight(35)
         self.btn_enter.setStyleSheet("""
             QPushButton {
@@ -633,31 +649,40 @@ class LoginWindow(QWidget):
             }
         """)
         self.btn_enter.clicked.connect(self.open_chat)
+        self.txt_password.returnPressed.connect(self.open_chat)
         layout.addWidget(self.btn_enter)
 
         # Referencia a la ventana de chat que se abrira luego.
         self.chat_window = None
 
     def open_chat(self):
-        # Metodo que se ejecuta al presionar "Entrar al chat".
-        # Se conecta al servidor usando el protocolo seleccionado
-        # y valida el nickname antes de abrir la ventana de chat.
+        # Metodo que se ejecuta al presionar "Iniciar sesión".
+        # Envía usuario y contraseña al servidor.
+        # Si el servidor acepta las credenciales, abre la ventana del chat.
 
-        nick = self.txt_nick.text().strip()
-        # Validaciones basicas del nickname.
-        if not nick:
-            QMessageBox.warning(self, "Error", "Debes escribir un nickname.")
+        user = self.txt_user.text().strip()
+        password = self.txt_password.text().strip()
+
+        # Validaciones básicas del usuario.
+        if not user:
+            QMessageBox.warning(self, "Error", "Debes escribir tu usuario.")
             return
-        if " " in nick:
-            QMessageBox.warning(self, "Error", "El nickname no puede contener espacios.")
+
+        if " " in user:
+            QMessageBox.warning(self, "Error", "El usuario no puede contener espacios.")
+            return
+
+        # Validación de contraseña.
+        if not password:
+            QMessageBox.warning(self, "Error", "Debes escribir tu contraseña.")
             return
 
         protocol = "TCP"
-        initial_data = ""  # contenido inicial que se enviara al ChatWindow
+        initial_data = ""
 
         try:
             if protocol == "TCP":
-                # Conexion TCP al servidor.
+                # Conexión TCP al servidor.
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2.0)
                 s.connect((SERVER_HOST, TCP_PORT))
@@ -667,79 +692,103 @@ class LoginWindow(QWidget):
                     data = s.recv(4096)
                     if data:
                         text = data.decode("utf-8")
+
                         if "Servidor lleno" in text:
-                            QMessageBox.warning(self, "Servidor lleno",
-                                                "El servidor TCP está lleno (máximo 5 usuarios).")
+                            QMessageBox.warning(
+                                self,
+                                "Servidor lleno",
+                                "El servidor TCP está lleno (máximo 5 usuarios)."
+                            )
                             s.close()
                             return
-                        # Si llega otro mensaje diferente, se ignora en este punto.
+
                 except socket.timeout:
-                    # Si se agota el tiempo, simplemente se continua.
                     pass
                 except Exception:
                     pass
 
-                # Enviar comando /nick al servidor.
+                # Enviar credenciales al servidor.
                 try:
-                    s.sendall(f"/nick {nick}\n".encode("utf-8"))
+                    s.sendall(f"/login {user} {password}\n".encode("utf-8"))
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"No se pudo enviar el nickname:\n{e}")
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"No se pudo enviar el login:\n{e}"
+                    )
                     s.close()
                     return
 
-                # Leer respuesta del servidor para verificar si el nick fue aceptado.
+                # Leer respuesta del servidor.
                 try:
                     data = s.recv(4096)
+
                     if not data:
-                        QMessageBox.critical(self, "Error", "El servidor cerró la conexión.")
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            "El servidor cerró la conexión."
+                        )
                         s.close()
                         return
+
                     text = data.decode("utf-8")
 
-                    # Diferentes casos de error relacionados con el nickname o el servidor.
-                    if "ya está en uso" in text:
-                        QMessageBox.warning(self, "Nickname ocupado",
-                                            "Ese nickname ya está en uso, elige otro.")
-                        s.close()
-                        return
-                    if "Nombre inválido" in text or "nickname no puede" in text:
-                        QMessageBox.warning(self, "Nickname inválido",
-                                            "El nickname es inválido.")
-                        s.close()
-                        return
-                    if "Servidor lleno" in text:
-                        QMessageBox.warning(self, "Servidor lleno",
-                                            "El servidor TCP está lleno (máximo 5 usuarios).")
+                    if "[AUTH_ERROR]" in text:
+                        mensaje = text.replace("[AUTH_ERROR]", "").strip()
+
+                        QMessageBox.warning(
+                            self,
+                            "Error de autenticación",
+                            mensaje
+                        )
                         s.close()
                         return
 
-                    # Si llega aqui, el nick fue aceptado por el servidor TCP.
+                    if "[AUTH_OK]" not in text:
+                        QMessageBox.warning(
+                            self,
+                            "Error",
+                            "No se pudo validar la autenticación con el servidor."
+                        )
+                        s.close()
+                        return
+
+                    # Si llega aquí, el usuario fue autenticado correctamente.
                     initial_data = text
 
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Error recibiendo respuesta del servidor:\n{e}")
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Error recibiendo respuesta del servidor:\n{e}"
+                    )
                     s.close()
                     return
 
         except Exception as e:
-            # Cualquier error general de conexion se muestra en un cuadro de dialogo.
-            QMessageBox.critical(self, "Error de conexión", f"No se pudo conectar al servidor:\n{e}")
+            QMessageBox.critical(
+                self,
+                "Error de conexión",
+                f"No se pudo conectar al servidor:\n{e}"
+            )
             try:
                 s.close()
             except:
                 pass
             return
 
-        # Si todo salio bien, se quita el timeout y se prepara el socket para chat.
+        # Quitar timeout para que el socket funcione normalmente en el chat.
         try:
             s.settimeout(None)
         except Exception:
             pass
 
-        # Se crea la ventana de chat, pasando tambien el texto inicial recibido.
-        self.chat_window = ChatWindow(protocol, nick, s, initial_data=initial_data)
+        # El usuario autenticado será también el nombre visible del chat.
+        self.chat_window = ChatWindow(protocol, user, s, initial_data=initial_data)
         self.chat_window.show()
-        # Se cierra la ventana de login.
+
+        # Cerrar ventana de login.
         self.close()
 
 

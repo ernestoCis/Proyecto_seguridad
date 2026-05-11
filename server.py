@@ -18,9 +18,17 @@ PORT = 5000 #puerto TCP
 # cuando varios hilos (clientes) la modifican al mismo tiempo.
 clients_lock = threading.Lock()
 
-# Diccionario que almacena la relación socket -> nickname.
-# La llave es el socket del cliente, y el valor es el apodo (nick) del usuario.
+# Diccionario que almacena la relación socket -> usuario autenticado.
+# La llave es el socket del cliente, y el valor es el usuario que inició sesión.
+# Antes se usaba como nickname, pero ahora el usuario será también el nombre visible.
 clients = {}  # socket -> nickname
+
+# Diccionario de usuarios registrados.
+# Llave: usuario.
+# Valor: contraseña.
+# En este proyecto se guarda en memoria.
+# Si se cierrasel servidor, los usuarios registrados se pierden.
+registered_users = {}
 
 
 def timestamp():
@@ -117,8 +125,9 @@ def handle_client(conn, addr):
 
     # El cliente GUI manda /nick automáticamente.
 
-    # La variable "nick" almacenará el nickname actual del cliente.
-    nick = None
+    # La variable "user" almacenará el usuario autenticado del cliente.
+    # Este usuario también será el nombre visible dentro del chat.
+    user = None
 
     try:
         # Bucle principal de comunicación con el cliente.
@@ -135,104 +144,106 @@ def handle_client(conn, addr):
             if not text:
                 continue
 
-            # 1) Aún no tiene nick
-            # Mientras el cliente no tenga un nickname establecido, solo se admite el comando /nick.
-            if nick is None:
-                if text.startswith("/nick "):
-                    # Se extrae el nuevo nick eliminando la palabra "/nick " y espacios sobrantes.
-                    newnick = text.split(" ", 1)[1].strip()
+            # 1) Aún no ha iniciado sesión
+            # Antes de chatear, el cliente debe enviar /login USUARIO CONTRASEÑA.
+            if user is None:
+                if text.startswith("/login "):
+                    parts = text.split(" ", 2)
 
-                    # Nick no puede tener espacios, se valida esta condición.
-                    if " " in newnick:
-                        conn.sendall(f"[{timestamp()}] El nickname no puede contener espacios.\n".encode("utf-8"))
+                    if len(parts) < 3:
+                        conn.sendall(
+                            f"[{timestamp()}] [AUTH_ERROR] Uso: /login USUARIO CONTRASEÑA\n"
+                            .encode("utf-8")
+                        )
                         continue
 
-                    # Si el nick está vacío, se considera inválido.
-                    if newnick == "":
-                        conn.sendall(f"[{timestamp()}] Nombre inválido.\n".encode("utf-8"))
+                    username = parts[1].strip()
+                    password = parts[2].strip()
+
+                    # Validaciones básicas.
+                    if username == "" or password == "":
+                        conn.sendall(
+                            f"[{timestamp()}] [AUTH_ERROR] Usuario y contraseña son obligatorios.\n"
+                            .encode("utf-8")
+                        )
                         continue
 
-                    # Se entra en la sección crítica para validar si el nick ya está en uso
-                    # y para registrar el nuevo nick en la estructura global.
+                    if " " in username:
+                        conn.sendall(
+                            f"[{timestamp()}] [AUTH_ERROR] El usuario no puede contener espacios.\n"
+                            .encode("utf-8")
+                        )
+                        continue
+
+                    # Se protege el acceso a los diccionarios compartidos.
                     with clients_lock:
-                        # Se revisa si el nick ya aparece en la lista de valores del diccionario.
-                        if newnick in clients.values():
+
+                        # Si el usuario no existe, se registra automáticamente.
+                        if username not in registered_users:
+                            registered_users[username] = password
+                            auth_message = (
+                                f"Usuario '{username}' registrado correctamente. "
+                                f"Bienvenido {username}."
+                            )
+
+                        # Si el usuario ya existe, se valida la contraseña.
+                        elif registered_users[username] == password:
+                            auth_message = f"Bienvenido de nuevo {username}."
+
+                        # Si existe pero la contraseña no coincide, se rechaza.
+                        else:
                             conn.sendall(
-                                f"[{timestamp()}] Ese nickname ya está en uso, elige otro.\n".encode("utf-8")
+                                f"[{timestamp()}] [AUTH_ERROR] Usuario o contraseña incorrectos.\n"
+                                .encode("utf-8")
                             )
                             try:
                                 conn.close()
                             except:
-                                # Si hay un problema cerrando el socket, se ignora.
                                 pass
-                            # Se sale por completo de la función, ya que no se permite duplicar nicks.
                             return
 
-                        # Si el nick está libre, se asocia este socket con ese nick.
-                        clients[conn] = newnick
+                        # Validar que el usuario no esté conectado actualmente.
+                        if username in clients.values():
+                            conn.sendall(
+                                f"[{timestamp()}] [AUTH_ERROR] El usuario '{username}' ya está conectado.\n"
+                                .encode("utf-8")
+                            )
+                            try:
+                                conn.close()
+                            except:
+                                pass
+                            return
 
-                    # Se actualiza la variable local "nick" con el nuevo nick.
-                    nick = newnick
-                    # Se anuncia a los demás usuarios que este nuevo usuario se conectó,
-                    # excluyendo al propio socket que acaba de entrar.
+                        # El usuario autenticado se registra como usuario visible del chat.
+                        clients[conn] = username
+
+                    user = username
+
+                    # Avisar a los demás usuarios que este usuario entró.
                     broadcast(
-                        f"[{timestamp()}] [SERVER] {nick} se ha conectado.\n",
+                        f"[{timestamp()}] [SERVER] {user} se ha conectado.\n",
                         exclude_sock=conn
                     )
-                    # Se envía la lista de usuarios actualizada a todos.
+
+                    # Enviar lista de usuarios actualizada.
                     broadcast_user_list()
-                    # Se confirma al propio cliente que su nick ya fue establecido correctamente.
-                    conn.sendall(f"[{timestamp()}] Nick establecido como {nick}.\n".encode("utf-8"))
-                else:
-                    # Si algún cliente habla sin /nick, sigue recibiendo este aviso
-                    # hasta que use el comando correcto.
+
+                    # Confirmar autenticación correcta al cliente.
                     conn.sendall(
-                        f"[{timestamp()}] Debes establecer un nickname con /nick TU_NOMBRE antes de chatear.\n"
+                        f"[{timestamp()}] [AUTH_OK] {auth_message}\n"
                         .encode("utf-8")
                     )
-                # Se continúa el while para seguir esperando que establezca el nick.
+
+                else:
+                    conn.sendall(
+                        f"[{timestamp()}] [AUTH_ERROR] Debes iniciar sesión con /login USUARIO CONTRASEÑA.\n"
+                        .encode("utf-8")
+                    )
+
                 continue
 
-            # 2) Ya tiene nick: comandos
+            # 2) Usuario ya autenticado: comandos del chat
             # A partir de aquí, el usuario ya tiene un nick y puede usar más comandos.
-
-            # Comando para cambiar de nickname una vez que ya tiene uno.
-            if text.startswith("/nick "):
-                # Se obtiene el nuevo nick propuesto.
-                newnick = text.split(" ", 1)[1].strip()
-                # No se permite un nick vacío.
-                if newnick == "":
-                    conn.sendall(f"[{timestamp()}] Nombre inválido.\n".encode("utf-8"))
-                    continue
-
-                # Se entra a la sección crítica para revisar el estado de los nicks.
-                with clients_lock:
-                    # Se obtiene el nick anterior asociado a este socket (si existe).
-                    old = clients.get(conn, "")
-                    # Si el nuevo nick es exactamente el mismo que ya tenía, se informa al usuario.
-                    if newnick == old:
-                        conn.sendall(f"[{timestamp()}] Ya estás usando ese nickname.\n".encode("utf-8"))
-                        continue
-                    # Si el nuevo nick está en uso por otro cliente, se rechaza el cambio.
-                    if newnick in clients.values():
-                        conn.sendall(
-                            f"[{timestamp()}] Ese nickname ya está en uso, elige otro.\n".encode("utf-8")
-                        )
-                        continue
-
-                    # Si todo está bien, se actualiza el nick en el diccionario global.
-                    clients[conn] = newnick
-
-                # Se guarda el nick anterior para el mensaje de difusión.
-                old_nick = nick
-                # Actualizamos la variable local "nick" al nuevo valor.
-                nick = newnick
-                # Se avisa a todos los usuarios que este usuario cambió su nombre.
-                broadcast(f"[{timestamp()}] [SERVER] {old_nick} ahora es {newnick}.\n")
-                # Se envía la lista actualizada de usuarios.
-                broadcast_user_list()
-                # Se continúa el bucle para seguir procesando nuevos mensajes.
-                continue
 
             # Comando para salir del servidor de forma ordenada.
             if text == "/quit":
@@ -263,7 +274,7 @@ def handle_client(conn, addr):
                     )
                     continue
                 # Se envía el mensaje privado usando la función auxiliar.
-                send_private(conn, nick, to_nick, msg_text)
+                send_private(conn, user, to_nick, msg_text)
                 # Se sigue el bucle sin difundir nada al canal general.
                 continue
 
@@ -272,16 +283,16 @@ def handle_client(conn, addr):
             # se trata como mensaje general, salvo los comandos de imágenes.
             if text == "/aime":
                 # Comando especial que envía un mensaje indicando una imagen asociada.
-                broadcast(f"[{timestamp()}] {nick}: [IMG] Imagenes/aime.jpg\n")
+                broadcast(f"[{timestamp()}] {user}: [IMG] Imagenes/aime.jpg\n")
                 continue
             if text == "/carlos":
                 # Comando especial similar para otra imagen.
-                broadcast(f"[{timestamp()}] {nick}: [IMG] Imagenes/carlos.jpg\n")
+                broadcast(f"[{timestamp()}] {user}: [IMG] Imagenes/carlos.jpg\n")
                 continue
             else:
                 # Si no es ninguno de esos comandos, se trata como mensaje normal
                 # y se difunde al resto de usuarios con su timestamp y nick.
-                broadcast(f"[{timestamp()}] {nick}: {text}\n")
+                broadcast(f"[{timestamp()}] {user}: {text}\n")
 
     except Exception as e:
         # Cualquier excepción durante el manejo del cliente se imprime en consola
