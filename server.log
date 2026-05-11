@@ -1,0 +1,35 @@
+2026-05-10 22:34:54,211 [INFO] Nueva conexión desde ('127.0.0.1', 64569)
+2026-05-10 22:34:54,681 [INFO] Nuevo usuario registrado: pau
+2026-05-10 22:34:54,681 [INFO] Usuario autenticado: pau
+2026-05-10 22:34:59,479 [INFO] Mensaje general de pau
+2026-05-10 22:35:16,467 [INFO] Nueva conexión desde ('127.0.0.1', 64574)
+2026-05-10 22:35:16,499 [INFO] Nuevo usuario registrado: paulina
+2026-05-10 22:35:16,499 [INFO] Usuario autenticado: paulina
+2026-05-10 22:35:29,830 [INFO] Nueva conexión desde ('127.0.0.1', 64576)
+2026-05-10 22:35:29,862 [WARNING] Intento de login fallido para usuario: pau
+2026-05-10 22:35:34,585 [INFO] Nueva conexión desde ('127.0.0.1', 64577)
+2026-05-10 22:35:44,559 [INFO] Nueva conexión desde ('127.0.0.1', 64578)
+2026-05-10 22:35:44,604 [WARNING] Intento de usuario inválido desde ('127.0.0.1', 64578)
+2026-05-10 22:35:50,997 [INFO] Nueva conexión desde ('127.0.0.1', 64579)
+2026-05-10 22:35:51,011 [INFO] Nuevo usuario registrado: ernesto
+2026-05-10 22:35:51,011 [INFO] Usuario autenticado: ernesto
+2026-05-10 22:36:04,628 [INFO] Nueva conexión desde ('127.0.0.1', 64582)
+2026-05-10 22:36:04,686 [INFO] Nuevo usuario registrado: ernesto2
+2026-05-10 22:36:04,686 [INFO] Usuario autenticado: ernesto2
+2026-05-10 22:36:16,458 [INFO] Nueva conexión desde ('127.0.0.1', 64584)
+2026-05-10 22:36:16,502 [INFO] Nuevo usuario registrado: michel
+2026-05-10 22:36:16,502 [INFO] Usuario autenticado: michel
+2026-05-10 22:36:25,538 [WARNING] Conexión rechazada desde ('127.0.0.1', 64586): servidor lleno
+2026-05-10 22:36:33,100 [WARNING] Conexión rechazada desde ('127.0.0.1', 64595): servidor lleno
+2026-05-10 22:36:46,217 [INFO] Mensaje privado: michel -> ernesto
+2026-05-10 22:36:52,184 [INFO] Mensaje general de michel
+2026-05-10 22:37:32,443 [ERROR] Error en handle_client: [WinError 10054] Se ha forzado la interrupción de una conexión existente por el host remoto
+2026-05-10 22:37:32,443 [INFO] Usuario desconectado: michel
+2026-05-10 22:37:33,270 [ERROR] Error en handle_client: [WinError 10054] Se ha forzado la interrupción de una conexión existente por el host remoto
+2026-05-10 22:37:33,271 [INFO] Usuario desconectado: ernesto2
+2026-05-10 22:37:33,798 [ERROR] Error en handle_client: [WinError 10054] Se ha forzado la interrupción de una conexión existente por el host remoto
+2026-05-10 22:37:33,799 [INFO] Usuario desconectado: ernesto
+2026-05-10 22:37:34,281 [ERROR] Error en handle_client: [WinError 10054] Se ha forzado la interrupción de una conexión existente por el host remoto
+2026-05-10 22:37:34,281 [INFO] Usuario desconectado: paulina
+2026-05-10 22:37:34,725 [ERROR] Error en handle_client: [WinError 10054] Se ha forzado la interrupción de una conexión existente por el host remoto
+2026-05-10 22:37:34,725 [INFO] Usuario desconectado: pau

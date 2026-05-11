@@ -6,6 +6,16 @@
 import socket
 import threading
 import datetime
+import logging
+import hashlib
+import re
+
+logging.basicConfig(
+    filename="server.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    encoding="utf-8"
+)
 
 import base64
 from Crypto.PublicKey import RSA
@@ -53,6 +63,32 @@ def timestamp():
     """Devuelve la fecha y hora actual en formato YYYY-MM-DD HH:MM:SS."""
     # Se obtiene la fecha y hora actual y se convierte a cadena con el formato indicado.
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def sanitize_input(text):
+    """
+    Elimina caracteres peligrosos y espacios innecesarios.
+    """
+    text = text.strip()
+
+    # Eliminar caracteres de control
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+
+    return text
+
+
+def validate_username(username):
+    """
+    Valida que el usuario tenga un formato seguro.
+    """
+    pattern = r"^[a-zA-Z0-9_]{3,20}$"
+    return re.match(pattern, username)
+
+
+def hash_password(password):
+    """
+    Genera hash SHA-256 de la contraseña.
+    """
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def encrypt_message(message, public_key):
     """
@@ -170,6 +206,8 @@ def send_private(from_sock, from_user, to_user, text):
 
     msg = f"[{timestamp()}] [PRIVADO] {from_user} → {to_user}: {text}\n"
 
+    logging.info(f"Mensaje privado: {from_user} -> {to_user}")
+
     for s in (from_sock, target_sock):
         try:
             send_encrypted(s, msg)
@@ -192,6 +230,7 @@ def remove_client(sock):
     # Si había un cliente ya registrado
     # se avisa a los demás que ese usuario se ha desconectado y se actualiza la lista.
     if nick:
+        logging.info(f"Usuario desconectado: {nick}")
         broadcast(f"[{timestamp()}] [SERVER] {nick} se ha desconectado.\n")
         broadcast_user_list()
 
@@ -269,8 +308,8 @@ def handle_client(conn, addr):
                         )
                         continue
 
-                    username = parts[1].strip()
-                    password = parts[2].strip()
+                    username = sanitize_input(parts[1])
+                    password = sanitize_input(parts[2])
 
                     # Validaciones básicas.
                     if username == "" or password == "":
@@ -278,6 +317,16 @@ def handle_client(conn, addr):
                             conn,
                             f"[{timestamp()}] [AUTH_ERROR] Usuario y contraseña son obligatorios.\n"
                         )
+                        continue
+
+                    if not validate_username(username):
+                        send_encrypted(
+                            conn,
+                            f"[{timestamp()}] [AUTH_ERROR] Usuario inválido.\n"
+                        )
+
+                        logging.warning(f"Intento de usuario inválido desde {addr}")
+
                         continue
 
                     if " " in username:
@@ -292,14 +341,15 @@ def handle_client(conn, addr):
 
                         # Si el usuario no existe, se registra automáticamente.
                         if username not in registered_users:
-                            registered_users[username] = password
+                            registered_users[username] = hash_password(password)
+                            logging.info(f"Nuevo usuario registrado: {username}")
                             auth_message = (
                                 f"Usuario '{username}' registrado correctamente. "
                                 f"Bienvenido {username}."
                             )
 
                         # Si el usuario ya existe, se valida la contraseña.
-                        elif registered_users[username] == password:
+                        elif registered_users[username] == hash_password(password):
                             auth_message = f"Bienvenido de nuevo {username}."
 
                         # Si existe pero la contraseña no coincide, se rechaza.
@@ -307,6 +357,9 @@ def handle_client(conn, addr):
                             send_encrypted(
                                 conn,
                                 f"[{timestamp()}] [AUTH_ERROR] Usuario o contraseña incorrectos.\n"
+                            )
+                            logging.warning(
+                                f"Intento de login fallido para usuario: {username}"
                             )
                             try:
                                 conn.close()
@@ -330,6 +383,8 @@ def handle_client(conn, addr):
                         clients[conn] = username
 
                     user = username
+
+                    logging.info(f"Usuario autenticado: {user}")
 
                     # Avisar a los demás usuarios que este usuario entró.
                     broadcast(
@@ -378,9 +433,9 @@ def handle_client(conn, addr):
                     )
                     continue
                 # El segundo elemento es el nick destino.
-                to_nick = parts[1].strip()
+                to_nick = sanitize_input(parts[1])
                 # El resto de la cadena es el mensaje privado.
-                msg_text = parts[2].strip()
+                msg_text = sanitize_input(parts[2])
                 # Se valida que ambos, nick destino y mensaje, no estén vacíos.
                 if not to_nick or not msg_text:
                     send_encrypted(
@@ -405,14 +460,24 @@ def handle_client(conn, addr):
                 broadcast(f"[{timestamp()}] {user}: [IMG] Imagenes/carlos.jpg\n")
                 continue
             else:
-                # Si no es ninguno de esos comandos, se trata como mensaje normal
-                # y se difunde al resto de usuarios con su timestamp y nick.
+
+                text = sanitize_input(text)
+
+                if len(text) > 500:
+                    send_encrypted(
+                        conn,
+                        f"[{timestamp()}] [ERROR] Mensaje demasiado largo.\n"
+                    )
+                    continue
+
+                logging.info(f"Mensaje general de {user}")
+
                 broadcast(f"[{timestamp()}] {user}: {text}\n")
 
     except Exception as e:
-        # Cualquier excepción durante el manejo del cliente se imprime en consola
+        # Cualquier excepción durante el manejo del cliente se imprime en logging
         # para depuración.
-        print("Error en handle_client:", e)
+        logging.error(f"Error en handle_client: {e}")
     finally:
         # Al salir (por error o porque el cliente se desconectó), se elimina el cliente.
         remove_client(conn)
@@ -433,11 +498,13 @@ def accept_loop(server_sock):
 
         # Si el número de clientes llega al límite, se rechaza la nueva conexión.
         if num_clients >= 5:
+            logging.warning(f"Conexión rechazada desde {addr}: servidor lleno")
             conn.close()
             continue
 
         # Si hay espacio, se informa en consola la nueva conexión.
         print(f"[SERVER] Conexión desde {addr}")
+        logging.info(f"Nueva conexión desde {addr}")
         # Se crea un nuevo hilo que atenderá a este cliente.
         # daemon=True indica que el hilo no impedirá que el programa termine
         # si todos los demás hilos principales terminan.
