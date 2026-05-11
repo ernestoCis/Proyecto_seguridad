@@ -7,6 +7,10 @@ import socket
 import threading
 import datetime
 
+import base64
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
+
 # Dirección IP donde escuchará el servidor.
 # 0.0.0.0 significa que escuchará en todas las interfaces de red disponibles.
 HOST = "0.0.0.0"
@@ -16,7 +20,7 @@ PORT = 5000 #puerto TCP
 
 # Lock (candado) para proteger el acceso concurrente a la estructura "clients"
 # cuando varios hilos (clientes) la modifican al mismo tiempo.
-clients_lock = threading.Lock()
+clients_lock = threading.RLock()
 
 # Diccionario que almacena la relación socket -> usuario autenticado.
 # La llave es el socket del cliente, y el valor es el usuario que inició sesión.
@@ -30,31 +34,105 @@ clients = {}  # socket -> nickname
 # Si se cierrasel servidor, los usuarios registrados se pierden.
 registered_users = {}
 
+# Llaves RSA del servidor.
+# El servidor tendrá una llave privada para descifrar mensajes
+# y una llave pública que compartirá con los clientes.
+server_key = RSA.generate(2048)
+server_private_key = server_key
+server_public_key = server_key.publickey()
+
+# Diccionario para guardar la llave pública de cada cliente conectado.
+# Llave: socket del cliente.
+# Valor: llave pública RSA del cliente.
+client_public_keys = {}
+
+recv_buffers = {}
+
 
 def timestamp():
     """Devuelve la fecha y hora actual en formato YYYY-MM-DD HH:MM:SS."""
     # Se obtiene la fecha y hora actual y se convierte a cadena con el formato indicado.
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def encrypt_message(message, public_key):
+    """
+    Cifra un mensaje usando RSA-OAEP y la llave pública recibida.
+    Devuelve el mensaje cifrado en Base64 para poder enviarlo por socket.
+    """
+    cipher = PKCS1_OAEP.new(public_key)
+    encrypted_bytes = cipher.encrypt(message.encode("utf-8"))
+    encrypted_b64 = base64.b64encode(encrypted_bytes).decode("utf-8")
+    return encrypted_b64
+
+
+def decrypt_message(encrypted_b64, private_key):
+    """
+    Descifra un mensaje en Base64 usando RSA-OAEP y la llave privada recibida.
+    Devuelve el texto original.
+    """
+    encrypted_bytes = base64.b64decode(encrypted_b64.encode("utf-8"))
+    cipher = PKCS1_OAEP.new(private_key)
+    decrypted_bytes = cipher.decrypt(encrypted_bytes)
+    return decrypted_bytes.decode("utf-8")
+
+
+def send_encrypted(sock, message):
+    """
+    Envía un mensaje cifrado a un cliente específico usando la llave pública
+    de ese cliente.
+    """
+    with clients_lock:
+        public_key = client_public_keys.get(sock)
+
+    if public_key is None:
+        return
+
+    encrypted_text = encrypt_message(message, public_key)
+    sock.sendall((encrypted_text + "\n").encode("utf-8"))
+
+
+def recv_encrypted(sock):
+    """
+    Recibe un mensaje cifrado desde un cliente.
+    Lee hasta encontrar salto de línea para evitar problemas si TCP junta mensajes.
+    """
+    with clients_lock:
+        buffer = recv_buffers.get(sock, "")
+
+    while "\n" not in buffer:
+        data = sock.recv(4096)
+
+        if not data:
+            return None
+
+        buffer += data.decode("utf-8")
+
+    encrypted_text, remaining = buffer.split("\n", 1)
+
+    with clients_lock:
+        recv_buffers[sock] = remaining
+
+    encrypted_text = encrypted_text.strip()
+
+    if encrypted_text == "":
+        return ""
+
+    plain_text = decrypt_message(encrypted_text, server_private_key)
+    return plain_text
+
 
 def broadcast(message, exclude_sock=None):
-    """Envía message a todos los clientes excepto exclude_sock."""
-    # Se copia la lista de sockets actuales bajo protección del candado
-    # para evitar problemas si la lista cambia mientras se recorre.
+    """Envía message cifrado a todos los clientes excepto exclude_sock."""
     with clients_lock:
         sockets = list(clients.keys())
-    # Se recorre cada socket conectado
+
     for sock in sockets:
-        # Si este socket es el que se quiere excluir (por ejemplo, el que envió el mensaje),
-        # se salta el envío a ese cliente.
         if sock is exclude_sock:
             continue
+
         try:
-            # Se envía el mensaje codificado en UTF-8 a ese cliente.
-            sock.sendall(message.encode("utf-8"))
+            send_encrypted(sock, message)
         except Exception:
-            # Si ocurre algún problema al enviar (cliente desconectado u otro error),
-            # se elimina ese cliente del servidor.
             remove_client(sock)
 
 
@@ -69,35 +147,33 @@ def broadcast_user_list():
     broadcast(msg)
 
 
-def send_private(from_sock, from_nick, to_nick, text):
-    """Envía un mensaje privado de from_nick a to_nick (solo ellos dos lo ven)."""
-    # Se busca el socket que corresponde al nickname destino.
+def send_private(from_sock, from_user, to_user, text):
+    """Envía un mensaje privado cifrado de from_user a to_user."""
     target_sock = None
+
     with clients_lock:
-        for sock, nick in clients.items():
-            # Si el nick coincide con el nick al que queremos enviar el privado, lo guardamos.
-            if nick == to_nick:
+        for sock, user in clients.items():
+            if user == to_user:
                 target_sock = sock
                 break
 
-    # Si no se encontró el usuario destino, se le avisa al emisor que ese usuario no existe.
     if target_sock is None:
         try:
-            from_sock.sendall(f"[{timestamp()}] [SERVER] Usuario '{to_nick}' no encontrado.\n".encode("utf-8"))
+            send_encrypted(
+                from_sock,
+                f"[{timestamp()}] [SERVER] Usuario '{to_user}' no encontrado.\n"
+            )
         except Exception:
-            # Si incluso fallara este envío, solo se ignora la excepción.
             pass
+
         return
 
-    # Se arma el mensaje de chat privado indicando origen, destino y contenido.
-    msg = f"[{timestamp()}] [PRIVADO] {from_nick} → {to_nick}: {text}\n"
-    # Este mensaje se envía tanto al que envió el privado como al destinatario,
-    # para que ambos vean el historial.
+    msg = f"[{timestamp()}] [PRIVADO] {from_user} → {to_user}: {text}\n"
+
     for s in (from_sock, target_sock):
         try:
-            s.sendall(msg.encode("utf-8"))
+            send_encrypted(s, msg)
         except Exception:
-            # Si falla el envío a alguno de los dos, se ignora el error.
             pass
 
 
@@ -105,6 +181,8 @@ def remove_client(sock):
     # Elimina al cliente del diccionario de clientes de forma segura usando el lock.
     with clients_lock:
         nick = clients.pop(sock, None)
+        client_public_keys.pop(sock, None)
+        recv_buffers.pop(sock, None)
     try:
         # Se cierra el socket del cliente para liberar recursos.
         sock.close()
@@ -118,6 +196,38 @@ def remove_client(sock):
         broadcast_user_list()
 
 
+def exchange_keys_with_client(conn):
+    """
+    Intercambia llaves públicas RSA con el cliente.
+
+    1. El servidor envía su llave pública.
+    2. El cliente responde con su llave pública.
+    3. El servidor guarda la llave pública del cliente.
+    """
+
+    # Enviar llave pública del servidor en formato PEM.
+    server_public_pem = server_public_key.export_key().decode("utf-8")
+    conn.sendall((server_public_pem + "\nEND_SERVER_PUBLIC_KEY\n").encode("utf-8"))
+
+    # Recibir llave pública del cliente hasta encontrar el marcador final.
+    buffer = ""
+
+    while "END_CLIENT_PUBLIC_KEY" not in buffer:
+        data = conn.recv(4096)
+
+        if not data:
+            return False
+
+        buffer += data.decode("utf-8")
+
+    client_public_pem = buffer.split("END_CLIENT_PUBLIC_KEY")[0].strip()
+    client_public_key = RSA.import_key(client_public_pem)
+
+    with clients_lock:
+        client_public_keys[conn] = client_public_key
+
+    return True
+
 def handle_client(conn, addr):
     # Esta función se ejecuta en un hilo independiente por cada cliente.
     # Se encarga de recibir los mensajes del cliente, procesar comandos y
@@ -130,17 +240,19 @@ def handle_client(conn, addr):
     user = None
 
     try:
-        # Bucle principal de comunicación con el cliente.
+        # Antes de recibir usuario/contraseña, se realiza el intercambio
+        # de llaves públicas RSA.
+        if not exchange_keys_with_client(conn):
+            return
+
         while True:
-            # Se recibe hasta 4096 bytes desde el socket del cliente.
-            data = conn.recv(4096)
-            # Si no se recibe nada, significa que el cliente cerró la conexión.
-            if not data:
+            text = recv_encrypted(conn)
+
+            if text is None:
                 break
 
-            # Se decodifica el mensaje de bytes a cadena y se quita el salto de línea al final.
-            text = data.decode("utf-8").rstrip("\n")
-            # Si después de limpiar el texto queda vacío, se ignora y se sigue leyendo.
+            text = text.rstrip("\n")
+
             if not text:
                 continue
 
@@ -151,9 +263,9 @@ def handle_client(conn, addr):
                     parts = text.split(" ", 2)
 
                     if len(parts) < 3:
-                        conn.sendall(
+                        send_encrypted(
+                            conn,
                             f"[{timestamp()}] [AUTH_ERROR] Uso: /login USUARIO CONTRASEÑA\n"
-                            .encode("utf-8")
                         )
                         continue
 
@@ -162,16 +274,16 @@ def handle_client(conn, addr):
 
                     # Validaciones básicas.
                     if username == "" or password == "":
-                        conn.sendall(
+                        send_encrypted(
+                            conn,
                             f"[{timestamp()}] [AUTH_ERROR] Usuario y contraseña son obligatorios.\n"
-                            .encode("utf-8")
                         )
                         continue
 
                     if " " in username:
-                        conn.sendall(
+                        send_encrypted(
+                            conn,
                             f"[{timestamp()}] [AUTH_ERROR] El usuario no puede contener espacios.\n"
-                            .encode("utf-8")
                         )
                         continue
 
@@ -192,9 +304,9 @@ def handle_client(conn, addr):
 
                         # Si existe pero la contraseña no coincide, se rechaza.
                         else:
-                            conn.sendall(
+                            send_encrypted(
+                                conn,
                                 f"[{timestamp()}] [AUTH_ERROR] Usuario o contraseña incorrectos.\n"
-                                .encode("utf-8")
                             )
                             try:
                                 conn.close()
@@ -204,9 +316,9 @@ def handle_client(conn, addr):
 
                         # Validar que el usuario no esté conectado actualmente.
                         if username in clients.values():
-                            conn.sendall(
+                            send_encrypted(
+                                conn,
                                 f"[{timestamp()}] [AUTH_ERROR] El usuario '{username}' ya está conectado.\n"
-                                .encode("utf-8")
                             )
                             try:
                                 conn.close()
@@ -225,19 +337,20 @@ def handle_client(conn, addr):
                         exclude_sock=conn
                     )
 
-                    # Enviar lista de usuarios actualizada.
-                    broadcast_user_list()
-
-                    # Confirmar autenticación correcta al cliente.
-                    conn.sendall(
+                    # Confirmar autenticación correcta al cliente primero.
+                    # El cliente espera recibir [AUTH_OK] antes de abrir la ventana del chat.
+                    send_encrypted(
+                        conn,
                         f"[{timestamp()}] [AUTH_OK] {auth_message}\n"
-                        .encode("utf-8")
                     )
 
+                    # Después se envía la lista de usuarios actualizada.
+                    broadcast_user_list()
+
                 else:
-                    conn.sendall(
+                    send_encrypted(
+                        conn,
                         f"[{timestamp()}] [AUTH_ERROR] Debes iniciar sesión con /login USUARIO CONTRASEÑA.\n"
-                        .encode("utf-8")
                     )
 
                 continue
@@ -248,7 +361,7 @@ def handle_client(conn, addr):
             # Comando para salir del servidor de forma ordenada.
             if text == "/quit":
                 # Se envía un mensaje de despedida al cliente.
-                conn.sendall(f"[{timestamp()}] Adiós!\n".encode("utf-8"))
+                send_encrypted(conn, f"[{timestamp()}] Adiós!\n")
                 # Se rompe el bucle, lo que llevará a cerrar la conexión en el finally.
                 break
 
@@ -259,8 +372,9 @@ def handle_client(conn, addr):
                 parts = text.split(" ", 2)
                 # Si no se reciben las tres partes, la sintaxis es incorrecta.
                 if len(parts) < 3:
-                    conn.sendall(
-                        f"[{timestamp()}] Uso: /msg NICK mensaje...\n".encode("utf-8")
+                    send_encrypted(
+                        conn,
+                        f"[{timestamp()}] Uso: /msg NICK mensaje...\n"
                     )
                     continue
                 # El segundo elemento es el nick destino.
@@ -269,8 +383,9 @@ def handle_client(conn, addr):
                 msg_text = parts[2].strip()
                 # Se valida que ambos, nick destino y mensaje, no estén vacíos.
                 if not to_nick or not msg_text:
-                    conn.sendall(
-                        f"[{timestamp()}] Uso: /msg NICK mensaje...\n".encode("utf-8")
+                    send_encrypted(
+                        conn,
+                        f"[{timestamp()}] Uso: /msg NICK mensaje...\n"
                     )
                     continue
                 # Se envía el mensaje privado usando la función auxiliar.
@@ -315,19 +430,10 @@ def accept_loop(server_sock):
         # Se verifica cuántos clientes están ya conectados.
         with clients_lock:
             num_clients = len(clients)
+
         # Si el número de clientes llega al límite, se rechaza la nueva conexión.
         if num_clients >= 5:
-            try:
-                # Se envía un mensaje al cliente indicándole que el servidor está lleno.
-                conn.sendall(
-                    f"[{timestamp()}] [SERVER] Servidor lleno (máximo 5 usuarios conectados).\n".encode("utf-8")
-                )
-            except Exception:
-                # Si falla el envío, se ignora.
-                pass
-            # Se cierra la conexión con el cliente rechazado.
             conn.close()
-            # Se continúa con el siguiente intento de conexión.
             continue
 
         # Si hay espacio, se informa en consola la nueva conexión.

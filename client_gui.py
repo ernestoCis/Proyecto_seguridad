@@ -14,11 +14,115 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
+import base64
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
+
 
 # Direccion del servidor y puertos para TCP y UDP.
 SERVER_HOST = "127.0.0.1" #Laptop: 192.168.100.52 / Local: 127.0.0.1
 TCP_PORT = 5000
 UDP_PORT = 5001
+
+# Llaves RSA del cliente.
+# Cada cliente genera su propio par de llaves.
+client_key = RSA.generate(2048)
+client_private_key = client_key
+client_public_key = client_key.publickey()
+
+# Aquí se guardará la llave pública del servidor.
+server_public_key = None
+
+recv_buffer = ""
+
+
+def encrypt_message(message, public_key):
+    """
+    Cifra un mensaje usando RSA-OAEP y la llave pública recibida.
+    Devuelve el mensaje cifrado en Base64.
+    """
+    cipher = PKCS1_OAEP.new(public_key)
+    encrypted_bytes = cipher.encrypt(message.encode("utf-8"))
+    encrypted_b64 = base64.b64encode(encrypted_bytes).decode("utf-8")
+    return encrypted_b64
+
+
+def decrypt_message(encrypted_b64, private_key):
+    """
+    Descifra un mensaje en Base64 usando RSA-OAEP y la llave privada recibida.
+    Devuelve el texto original.
+    """
+    encrypted_bytes = base64.b64decode(encrypted_b64.encode("utf-8"))
+    cipher = PKCS1_OAEP.new(private_key)
+    decrypted_bytes = cipher.decrypt(encrypted_bytes)
+    return decrypted_bytes.decode("utf-8")
+
+
+def send_encrypted(sock, message):
+    """
+    Envía un mensaje cifrado al servidor usando la llave pública del servidor.
+    """
+    global server_public_key
+
+    if server_public_key is None:
+        raise Exception("No se ha recibido la llave pública del servidor.")
+
+    encrypted_text = encrypt_message(message, server_public_key)
+    sock.sendall((encrypted_text + "\n").encode("utf-8"))
+
+
+def recv_encrypted(sock):
+    """
+    Recibe un mensaje cifrado desde el servidor.
+    Lee hasta encontrar salto de línea para evitar problemas si TCP junta mensajes.
+    """
+    global recv_buffer
+
+    while "\n" not in recv_buffer:
+        data = sock.recv(4096)
+
+        if not data:
+            return None
+
+        recv_buffer += data.decode("utf-8")
+
+    encrypted_text, recv_buffer = recv_buffer.split("\n", 1)
+    encrypted_text = encrypted_text.strip()
+
+    if encrypted_text == "":
+        return ""
+
+    plain_text = decrypt_message(encrypted_text, client_private_key)
+    return plain_text
+
+
+def exchange_keys_with_server(sock):
+    """
+    Intercambia llaves públicas RSA con el servidor.
+
+    1. Recibe la llave pública del servidor.
+    2. Envía la llave pública del cliente.
+    """
+
+    global server_public_key
+
+    buffer = ""
+
+    while "END_SERVER_PUBLIC_KEY" not in buffer:
+        data = sock.recv(4096)
+
+        if not data:
+            return False
+
+        buffer += data.decode("utf-8")
+
+    server_public_pem = buffer.split("END_SERVER_PUBLIC_KEY")[0].strip()
+    server_public_key = RSA.import_key(server_public_pem)
+
+    client_public_pem = client_public_key.export_key().decode("utf-8")
+    sock.sendall((client_public_pem + "\nEND_CLIENT_PUBLIC_KEY\n").encode("utf-8"))
+
+    return True
 
 
 class ChatBubble(QLabel):
@@ -241,7 +345,7 @@ class ChatWindow(QWidget):
         try:
             if self.sock:
                 try:
-                    self.sock.sendall("/quit\n".encode("utf-8"))
+                    send_encrypted(self.sock, "/quit\n")
                 except:
                     pass
                 self.sock.close()
@@ -375,26 +479,26 @@ class ChatWindow(QWidget):
         self.stack_layout.setCurrentWidget(container)
 
     # ==========================================================
-    # Recibir mensajes (TCP o UDP, usando recv igual)
+    # Recibir mensajes (TCP, usando recv igual)
     # ==========================================================
     def receive_loop(self):
         # Hilo que se queda leyendo mensajes desde el socket.
         # Cada linea recibida se envia a la interfaz a traves de la senal message_received.
         while True:
             try:
-                data = self.sock.recv(4096)
-                if not data:
-                    # Si se recibe nada, se asume que el servidor se desconecto.
+                text = recv_encrypted(self.sock)
+
+                if text is None:
                     self.message_received.emit("[Servidor desconectado]")
                     break
 
-                text = data.decode("utf-8")
                 # Se separan las lineas por saltos de linea y se procesan una por una.
                 for line in text.splitlines():
                     self.message_received.emit(line)
 
             except Exception:
                 # Cualquier error rompe el bucle y termina el hilo de recepcion.
+                print("Error en receive_loop:", e)
                 break
 
     # ==========================================================
@@ -410,11 +514,11 @@ class ChatWindow(QWidget):
         try:
             if self.current_target is None:
                 # Mensaje grupal: se envia tal cual al servidor.
-                self.sock.sendall((msg + "\n").encode("utf-8"))
+                send_encrypted(self.sock, msg + "\n")
             else:
                 # Mensaje privado: se antepone /msg con el nick destino.
                 cmd = f"/msg {self.current_target} {msg}"
-                self.sock.sendall((cmd + "\n").encode("utf-8"))
+                send_encrypted(self.sock, cmd + "\n")
         except Exception:
             # Si hay algun problema al enviar, se muestra un mensaje en el chat.
             self.message_received.emit("[ERROR] No se pudo enviar")
@@ -564,7 +668,7 @@ class ChatWindow(QWidget):
 
 
 # ==========================================================
-# Ventana de Login: protocolo + nickname (con validacion)
+# Ventana de Login
 # ==========================================================
 class LoginWindow(QWidget):
     def __init__(self):
@@ -684,32 +788,21 @@ class LoginWindow(QWidget):
             if protocol == "TCP":
                 # Conexión TCP al servidor.
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(2.0)
+                s.settimeout(10.0)
                 s.connect((SERVER_HOST, TCP_PORT))
 
-                # Intento de leer un posible mensaje de "Servidor lleno".
-                try:
-                    data = s.recv(4096)
-                    if data:
-                        text = data.decode("utf-8")
-
-                        if "Servidor lleno" in text:
-                            QMessageBox.warning(
-                                self,
-                                "Servidor lleno",
-                                "El servidor TCP está lleno (máximo 5 usuarios)."
-                            )
-                            s.close()
-                            return
-
-                except socket.timeout:
-                    pass
-                except Exception:
-                    pass
+                if not exchange_keys_with_server(s):
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        "No se pudo realizar el intercambio de llaves RSA con el servidor."
+                    )
+                    s.close()
+                    return
 
                 # Enviar credenciales al servidor.
                 try:
-                    s.sendall(f"/login {user} {password}\n".encode("utf-8"))
+                    send_encrypted(s, f"/login {user} {password}\n")
                 except Exception as e:
                     QMessageBox.critical(
                         self,
@@ -721,9 +814,9 @@ class LoginWindow(QWidget):
 
                 # Leer respuesta del servidor.
                 try:
-                    data = s.recv(4096)
+                    text = recv_encrypted(s)
 
-                    if not data:
+                    if text is None:
                         QMessageBox.critical(
                             self,
                             "Error",
@@ -731,8 +824,6 @@ class LoginWindow(QWidget):
                         )
                         s.close()
                         return
-
-                    text = data.decode("utf-8")
 
                     if "[AUTH_ERROR]" in text:
                         mensaje = text.replace("[AUTH_ERROR]", "").strip()
