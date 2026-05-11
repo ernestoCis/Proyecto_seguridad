@@ -496,7 +496,7 @@ class ChatWindow(QWidget):
                 for line in text.splitlines():
                     self.message_received.emit(line)
 
-            except Exception:
+            except Exception as e:
                 # Cualquier error rompe el bucle y termina el hilo de recepcion.
                 print("Error en receive_loop:", e)
                 break
